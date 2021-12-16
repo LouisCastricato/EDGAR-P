@@ -79,7 +79,7 @@ def continue_story_svo_customprompt_future_tense(model, story, question, verbose
   
   #con = construct(inp, " A.")
   #print("construct is ", con, "\n"*2)
-  out = generate(model, con, max_length=850, horizon=story, horizon_penalty=1.8, beams=5, repetition_penalty=2.8, do_beams=True)
+  out = generate(model, con, max_length=850, horizon=story, horizon_penalty=1.8, beams=5, repetition_penalty=1.8, do_beams=True)
   
   #return out
   out = out.split("Story 3")[1]

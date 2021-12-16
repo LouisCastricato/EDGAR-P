@@ -39,10 +39,12 @@ for i in tqdm(r[:num_stories]):
   inp_story = inp_story_full[-1]
   if backwards:
     q = get_questions_past_tense(model, inp_story)[0]
+    print(q)
     starts = continue_story_svo_customprompt_past_tense(model, inp_story, q)
 
   else:
     q = get_questions_future_tense(model, inp_story)[0]
+    print(q)
     starts = continue_story_svo_customprompt_future_tense(model, inp_story, q)
 
 
