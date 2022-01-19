@@ -34,8 +34,9 @@ from transformers.generation_logits_process import (
     NoBadWordsLogitsProcessor, 
     NoRepeatNGramLogitsProcessor, 
     RepetitionPenaltyLogitsProcessor,
+    TopKLogitsWarper,
+    TopPLogitsWarper,
 )
-
 
 import transformers
 transformers.logging.set_verbosity(transformers.logging.CRITICAL)
@@ -77,7 +78,10 @@ def load_gptj():
     return model.half().cuda()
 
 tokenizer = GPT2Tokenizer.from_pretrained("EleutherAI/gpt-neo-2.7B")
-
+#print(tokenizer(" A- In all three stories,"))
+#print(tokenizer.decode([12]))
+#import sys
+#sys.exit()
 class HorizonRepetitionPenalty(LogitsProcessor):
   def __init__(self, penalty: float, horizon: torch.LongTensor, horizon_exclusive = False):
     if not isinstance(penalty, float) or not (penalty > 0):
@@ -160,24 +164,28 @@ def generate(model, ids, max_length=1024,
     beams=2,
     extra_bad_words = None,
     repetition_penalty=2.0,
-    do_beams = False):
+    do_sample = False,
+    num_return_sequences = 1):
 
   bad_words_t = bad_words_ids
   if extra_bad_words is not None:
     bad_words_t += extra_bad_words
   model_out=None
   if horizon is None:
-    print("generating with no horizon")
     model_out = model.generate(input_ids = ids['input_ids'],
-    max_length=max_length,
-    num_beams=beams,
+    max_length=len(ids['input_ids'][0]) + max_length,
+    do_sample=True,
+    top_k = 3,
+    top_p = 0.99,
+    num_return_sequences=num_return_sequences,
     no_repeat_ngram_size=5,
+    num_beams=beams,
     bad_words_ids=bad_words_t,
-    repetition_penalty=repetition_penalty)[0]
+    repetition_penalty=repetition_penalty)
   else:
     horizon_ids = tokenizer(horizon, return_tensors="pt")['input_ids'].cuda()
     input_ids = ids["input_ids"]
-    model.config.max_length = max_length
+    model.config.max_length = len(ids['input_ids'][0]) + max_length
     # instantiate logits processors
     logits_processor = LogitsProcessorList([
         MinLengthLogitsProcessor(ids['input_ids'].shape[1], model.config.eos_token_id),
@@ -186,37 +194,46 @@ def generate(model, ids, max_length=1024,
         HorizonRepetitionPenalty(penalty=horizon_penalty, horizon=horizon_ids, horizon_exclusive=True),
         RepetitionPenaltyLogitsProcessor(penalty=repetition_penalty)
     ])
-    stopping_criteria = StoppingCriteriaList([
-        MaxLengthCriteria(max_length=max_length),
+    logits_warper = LogitsProcessorList([
+        TopPLogitsWarper(top_p=0.99),
+        TopKLogitsWarper(top_k=3),
     ])
-    model_kwargs={
-        "attention_mask":ids['attention_mask'],
-        "use_cache":True,
-    }
-    with torch.no_grad():
-      if do_beams:
+    stopping_criteria = StoppingCriteriaList([
+        MaxLengthCriteria(max_length=len(ids['input_ids'][0]) + max_length),
+    ])
+    with torch.no_grad(): 
+        if beams > 1:
           beam_scorer = BeamSearchScorer(
-                batch_size=ids["input_ids"].shape[0],
-                num_beams=beams,
-                device=model.device,
-                length_penalty=1.0,
-                do_early_stopping=True,
-                num_beam_hyps_to_keep=1,
-            )        
-     
+              batch_size=ids["input_ids"].shape[0],
+              num_beams=beams,
+              device=model.device,
+              length_penalty=1.0,
+              do_early_stopping=True,
+              num_beam_hyps_to_keep=num_return_sequences,
+          )       
           input_ids, model_kwargs = model._expand_inputs_for_generation(
               ids["input_ids"], expand_size=beams, is_encoder_decoder=model.config.is_encoder_decoder
           )
-        
-          model_out = model.beam_search(
-              input_ids=input_ids, beam_scorer = beam_scorer, logits_processor=logits_processor,\
-              stopping_criteria=stopping_criteria)[0]
-      else:
-          model_out = model.greedy_search(
-              input_ids=input_ids, logits_processor=logits_processor,\
-              stopping_criteria=stopping_criteria)[0]         
-    
-  return tokenizer.decode(model_out)
+        if not do_sample:
+            model_out = model.beam_search(
+                input_ids=input_ids, beam_scorer = beam_scorer, logits_processor=logits_processor,\
+                stopping_criteria=stopping_criteria)
+        else:
+            if beams > 1:
+              model_out = model.beam_sample(
+                  input_ids=input_ids, beam_scorer = beam_scorer,
+                  logits_warper=logits_warper, logits_processor=logits_processor,
+                  stopping_criteria=stopping_criteria)  
+            else:
+              model_out = model.sample(input_ids=input_ids,
+                  logits_warper=logits_warper, logits_processor=logits_processor,
+                  stopping_criteria=stopping_criteria)
+
+  if num_return_sequences > 1:
+    model_out = list(map(tokenizer.decode, model_out))
+  else:
+    model_out = tokenizer.decode(model_out[0])
+  return model_out
 
 
 rep = transformers.RepetitionPenaltyLogitsProcessor(1.1)
@@ -269,8 +286,12 @@ def rank(model, string, force_start=2):
   #Filtering out the first few tokens helps significantly. so force_start = 3
   return perplexity_w_rep(construct(t1, t2, force_start = force_start), m=model) 
 
-
-
+# permutes an input string for tokenization
+def permute_string(string, lower = False):
+  spaces = [string, " " + string, string + " ", " " + string + " "]
+  line_breaks = ["\n" + string, string + "\n", "\n " + string]
+  if lower: return spaces + line_breaks
+  return spaces + line_breaks + permute_string(string.lower(), True)
 
 #Take zero means that the beam is carrying questions, so take the first element
 def rank_sort(model, stories, take_zero=True):
